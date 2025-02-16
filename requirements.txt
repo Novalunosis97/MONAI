@@ -1,0 +1,6 @@
+streamlit
+monai
+torch
+numpy
+scikit-image
+vtk

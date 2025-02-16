@@ -307,22 +307,33 @@ def save_metadata(metadata, output_directory):
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)
 
-def main(input_directory, output_directory):
+def main(input_file, output_directory):
+    """
+    Process a single medical image file and generate 3D segmentation.
+    
+    Args:
+        input_file (str): Path to the input .nii file
+        output_directory (str): Path where output files should be saved
+    """
+    os.makedirs(output_directory, exist_ok=True)
+    
+    # Your existing preprocessing and model loading code remains exactly the same
     image_loader = LoadImage(image_only=True)
-    CT = image_loader(input_directory)
+    CT = image_loader(input_file)
 
     preprocessing_pipeline = Compose([
         LoadImage(image_only=True),
         EnsureChannelFirst(),
         Orientation(axcodes='LPS')
     ])
-    CT = preprocessing_pipeline(input_directory)
+    CT = preprocessing_pipeline(input_file)
 
-    datadir = "/Users/raja/Downloads"
+    # Note: You might want to make this path configurable
+    datadir = os.path.dirname(os.path.abspath(__file__))
     model_name = "wholeBody_ct_segmentation"
     download(name=model_name, bundle_dir=datadir)
-    model_path = os.path.join(datadir, 'wholeBody_ct_segmentation', 'models', 'model_lowres.pt')
-    config_path = os.path.join(datadir, 'wholeBody_ct_segmentation', 'configs', 'inference.json')
+    model_path = os.path.join(datadir, 'model_lowres.pt')
+    config_path = os.path.join(datadir, 'inference.json')
 
     config = ConfigParser()
     config.read_config(config_path)
@@ -458,8 +469,11 @@ def main(input_directory, output_directory):
     visualize_3d_multilabel(data['pred'], output_directory)
 
 if __name__ == "__main__":
-    input_directory = '/Users/raja/Downloads/Task07_Pancreas/imagesTr/pancreas_080.nii'
-    output_directory = "/Users/raja/Downloads/output_pancreas"
+    # This part allows the script to still run standalone if needed
+    import argparse
+    parser = argparse.ArgumentParser(description='Process medical images for 3D segmentation')
+    parser.add_argument('--input', required=True, help='Path to input .nii file')
+    parser.add_argument('--output', required=True, help='Path to output directory')
+    args = parser.parse_args()
     
-    os.makedirs(output_directory, exist_ok=True)
-    main(input_directory, output_directory)
+    main(args.input, args.output)
