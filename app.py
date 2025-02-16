@@ -2,43 +2,10 @@ import streamlit as st
 import os
 import tempfile
 from zipfile import ZipFile
-import sys
-from pathlib import Path
-
-def check_vtk_dependencies():
-    """Check if VTK and its system dependencies are available"""
-    try:
-        import vtk
-        # Try to create a simple VTK object to test functionality
-        renderer = vtk.vtkRenderer()
-        return True
-    except ImportError:
-        return "VTK is not installed. Please install it with: pip install vtk"
-    except Exception as e:
-        if "libXrender" in str(e):
-            return ("Missing system library: libXrender. Please install it with:\n"
-                   "Ubuntu/Debian: sudo apt-get install libxrender1\n"
-                   "CentOS/RHEL: sudo yum install libXrender\n"
-                   "macOS: brew install xquartz")
-        return f"VTK dependency error: {str(e)}"
-
-def check_python_dependencies():
-    """Check if required Python packages are installed"""
-    dependencies = {
-        'monai': 'monai',
-        'torch': 'torch',
-        'numpy': 'numpy',
-        'scikit-image': 'skimage'
-    }
-    
-    missing = []
-    for package, import_name in dependencies.items():
-        try:
-            __import__(import_name)
-        except ImportError:
-            missing.append(package)
-    
-    return missing
+import numpy as np
+import torch
+from monai.transforms import LoadImage, EnsureChannelFirst, Orientation
+from monai.bundle import ConfigParser, download
 
 def create_zip_file(directory_path, output_filename):
     """Create a ZIP file from the directory contents"""
@@ -49,47 +16,72 @@ def create_zip_file(directory_path, output_filename):
                 arcname = os.path.relpath(file_path, directory_path)
                 zipf.write(file_path, arcname)
 
-def check_segmentation_file():
-    """Check if segmentation.py exists in the correct location"""
-    current_dir = Path(__file__).parent
-    segmentation_path = current_dir / "segmentation.py"
-    return segmentation_path.exists()
+def process_image(input_file, output_directory):
+    """Process a single medical image file without VTK visualization"""
+    os.makedirs(output_directory, exist_ok=True)
+    
+    # Load and preprocess the image
+    preprocessing_pipeline = LoadImage(image_only=True)
+    CT = preprocessing_pipeline(input_file)
+    
+    # Add channel dimension if needed
+    if len(CT.shape) == 3:
+        CT = np.expand_dims(CT, 0)
+    
+    # Convert to tensor
+    CT = torch.from_numpy(CT).float()
+    
+    # Download and load the model
+    datadir = os.path.dirname(os.path.abspath(__file__))
+    model_name = "wholeBody_ct_segmentation"
+    download(name=model_name, bundle_dir=datadir)
+    model_path = os.path.join(datadir, 'model_lowres.pt')
+    
+    # Load model configuration
+    config_path = os.path.join(datadir, 'inference.json')
+    config = ConfigParser()
+    config.read_config(config_path)
+    
+    # Set up preprocessing and model
+    preprocessing = config.get_parsed_content("preprocessing")
+    data = preprocessing({'image': CT})
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = config.get_parsed_content("network")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    
+    # Run inference
+    with torch.no_grad():
+        data['pred'] = model(data['image'].unsqueeze(0).to(device))
+        data['pred'] = data['pred'][0]
+    
+    # Save predictions
+    pred_path = os.path.join(output_directory, 'predictions.npy')
+    np.save(pred_path, data['pred'].cpu().numpy())
+    
+    # Save metadata
+    metadata = {
+        'input_shape': list(CT.shape),
+        'output_shape': list(data['pred'].shape),
+        'device_used': str(device)
+    }
+    
+    import json
+    metadata_path = os.path.join(output_directory, 'metadata.json')
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=4)
+    
+    return data['pred']
 
 def main_app():
-    st.title("3D Medical Image Segmentation")
+    st.title("Medical Image Segmentation")
+    st.write("Upload a medical image file (.nii format) for segmentation")
     
-    # Check Python dependencies
-    missing_packages = check_python_dependencies()
-    if missing_packages:
-        st.error("Missing required Python packages!")
-        st.code(f"pip install {' '.join(missing_packages)}", language="bash")
-        st.info("Please install the missing packages and restart the application.")
-        return
-
-    # Check VTK and system dependencies
-    vtk_status = check_vtk_dependencies()
-    if vtk_status is not True:
-        st.error("VTK dependency check failed!")
-        st.text(vtk_status)
-        return
-
-    # Check if segmentation.py exists
-    if not check_segmentation_file():
-        st.error("segmentation.py not found!")
-        st.info("Please ensure segmentation.py is in the same directory as this Streamlit app.")
-        return
-
-    # Only import segmentation after all checks pass
-    try:
-        from segmentation import main as segmentation_main
-    except ImportError as e:
-        st.error(f"Failed to import segmentation module: {str(e)}")
-        st.info("Please check that segmentation.py contains a properly defined 'main' function.")
-        return
-
-    st.write("Upload a medical image file (.nii format) for 3D segmentation")
+    # File uploader
     uploaded_file = st.file_uploader("Choose a .nii file", type=['nii'])
-
+    
     if uploaded_file is not None:
         with tempfile.TemporaryDirectory() as temp_input_dir, \
              tempfile.TemporaryDirectory() as temp_output_dir:
@@ -98,31 +90,39 @@ def main_app():
             input_path = os.path.join(temp_input_dir, uploaded_file.name)
             with open(input_path, 'wb') as f:
                 f.write(uploaded_file.getvalue())
-
+            
             try:
                 with st.spinner('Processing... This may take several minutes.'):
-                    # Call the segmentation function
-                    segmentation_main(input_path, temp_output_dir)
-
+                    # Process the image
+                    predictions = process_image(input_path, temp_output_dir)
+                    
+                    # Create visualization of results (optional)
+                    st.write("Segmentation complete!")
+                    
+                    # Show some basic statistics
+                    st.write("Segmentation Statistics:")
+                    st.write(f"- Number of classes detected: {len(np.unique(predictions.argmax(0)))}")
+                    st.write(f"- Output shape: {predictions.shape}")
+                    
                     # Create ZIP file of results
                     zip_path = os.path.join(temp_input_dir, 'results.zip')
                     create_zip_file(temp_output_dir, zip_path)
-
+                    
                     # Provide download button
                     with open(zip_path, 'rb') as f:
                         st.download_button(
-                            label="Download Processed Files",
+                            label="Download Results",
                             data=f.read(),
                             file_name="segmentation_results.zip",
                             mime="application/zip"
                         )
-
+                    
                     st.success('Processing complete! Click above to download your results.')
-
+            
             except Exception as e:
                 st.error("An error occurred during processing!")
                 st.error(str(e))
-                st.info("Please check that your input file is valid and all dependencies are properly installed.")
+                st.info("Please ensure your input file is valid and try again.")
 
 if __name__ == "__main__":
     main_app()
